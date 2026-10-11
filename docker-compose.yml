@@ -1,0 +1,47 @@
+services:
+  mysql:
+    image: mysql:8.0
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-change-this-root-password}
+      MYSQL_DATABASE: cooplending
+      MYSQL_USER: cooplending
+      MYSQL_PASSWORD: ${DB_PASSWORD:-cooplending-local}
+    command: ["--character-set-server=utf8mb4", "--collation-server=utf8mb4_0900_ai_ci"]
+    volumes:
+      - mysql_data:/var/lib/mysql
+      - ./schema.sql:/docker-entrypoint-initdb.d/001-schema.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h localhost -uroot -p$$MYSQL_ROOT_PASSWORD --silent"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    restart: unless-stopped
+
+  python_service:
+    build: ./python_service
+    volumes:
+      - ./python_service:/app
+    environment:
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-dummy}
+      GROQ_API_KEY: ${GROQ_API_KEY:-}
+    expose: ["8001"]
+    restart: unless-stopped
+
+  php_app:
+    build: ./php_app
+    volumes:
+      - ./php_app:/var/www/html
+    environment:
+      DB_HOST: mysql
+      DB_NAME: cooplending
+      DB_USER: cooplending
+      DB_PASSWORD: ${DB_PASSWORD:-cooplending-local}
+      AI_SERVICE_URL: http://python_service:8001/api/v1/extract
+    ports: ["8085:80"]
+    depends_on:
+      mysql: {condition: service_healthy}
+      python_service: {condition: service_started}
+    restart: unless-stopped
+
+volumes:
+  mysql_data:

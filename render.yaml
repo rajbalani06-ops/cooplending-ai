@@ -1,0 +1,43 @@
+services:
+  - type: web
+    name: cooplending-ai-service
+    runtime: docker
+    dockerContext: ./python_service
+    dockerfilePath: ./python_service/Dockerfile
+    envVars:
+      - key: OPENAI_API_KEY
+        sync: false
+
+  - type: web
+    name: cooplending-web
+    runtime: docker
+    dockerContext: ./php_app
+    dockerfilePath: ./php_app/Dockerfile
+    envVars:
+      - key: AI_SERVICE_URL
+        fromService:
+          type: web
+          name: cooplending-ai-service
+          property: host
+      - key: DB_HOST
+        fromDatabase:
+          name: cooplending-db
+          property: host
+      - key: DB_USER
+        fromDatabase:
+          name: cooplending-db
+          property: user
+      - key: DB_PASSWORD
+        fromDatabase:
+          name: cooplending-db
+          property: password
+      - key: DB_NAME
+        fromDatabase:
+          name: cooplending-db
+          property: database
+
+databases:
+  - name: cooplending-db
+    databaseName: cooplending
+    user: cooplending_user
+    plan: free
