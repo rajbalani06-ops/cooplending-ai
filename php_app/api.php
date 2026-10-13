@@ -17,7 +17,10 @@ if (!is_array($input)) respond(400, ['error' => 'Request body must be valid JSON
 
 $demoText = "राजारामबापू सह. बँक लि., खाते क्र: ९८४५०१२३८९, खातेदार: विठ्ठल सखाराम कदम, पॅन: ABCDE1234F, मासिक उत्पन्न: ४५,०००";
 $rawText = ($input['action'] ?? '') === 'demo' ? $demoText : trim((string)($input['raw_text'] ?? ''));
-if ($rawText === '' || mb_strlen($rawText) > 20000) respond(422, ['error' => 'raw_text is required']);
+if ($rawText === '') respond(422, ['error' => 'Document text is required.']);
+$textLength = mb_strlen($rawText, 'UTF-8');
+if ($textLength < 8) respond(422, ['error' => 'Document text is too short. Minimum 8 characters required.']);
+if ($textLength > 20000) respond(422, ['error' => 'Document text exceeds maximum 20,000 characters limit.']);
 
 $workerUrl = getenv('AI_SERVICE_URL') ?: 'http://python_service:8001/api/v1/extract';
 $curl = curl_init($workerUrl);
@@ -26,7 +29,7 @@ curl_setopt_array($curl, [
     CURLOPT_RETURNTRANSFER => true,
     CURLOPT_HTTPHEADER => ['Content-Type: application/json', 'Accept: application/json'],
     CURLOPT_POSTFIELDS => json_encode(['raw_text' => $rawText], JSON_UNESCAPED_UNICODE),
-    CURLOPT_CONNECTTIMEOUT => 5, 
+    CURLOPT_CONNECTTIMEOUT => 10,
     CURLOPT_TIMEOUT => 90,
 ]);
 $responseBody = curl_exec($curl);
@@ -36,8 +39,26 @@ curl_close($curl);
 
 if ($responseBody === false) respond(502, ['error' => 'Could not reach AI extraction service', 'detail' => $curlError]);
 $assessment = json_decode($responseBody, true);
+
 if ($httpCode < 200 || $httpCode >= 300 || !is_array($assessment)) {
-    respond($httpCode >= 400 && $httpCode < 600 ? $httpCode : 502, ['error' => $assessment['detail'] ?? 'AI extraction failed']);
+    $errorMessage = 'AI extraction failed';
+
+    if (isset($assessment['detail'])) {
+        if (is_array($assessment['detail'])) {
+            $messages = [];
+            foreach ($assessment['detail'] as $item) {
+                if (is_array($item) && isset($item['msg'])) {
+                    $messages[] = preg_replace('/^Value error,\s*/i', '', (string)$item['msg']);
+                }
+            }
+            $errorMessage = $messages ? implode('; ', $messages) : 'Invalid input format';
+        } elseif (is_string($assessment['detail'])) {
+            $errorMessage = $assessment['detail'];
+        }
+    }
+
+    $statusCode = ($httpCode >= 400 && $httpCode < 600) ? $httpCode : 502;
+    respond($statusCode, ['error' => $errorMessage]);
 }
 
 try {

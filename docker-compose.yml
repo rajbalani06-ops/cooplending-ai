@@ -25,6 +25,12 @@ services:
       OPENAI_API_KEY: ${OPENAI_API_KEY:-dummy}
       GROQ_API_KEY: ${GROQ_API_KEY:-}
     expose: ["8001"]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8001/health', timeout=2)"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 20s
     restart: unless-stopped
 
   php_app:
@@ -40,7 +46,7 @@ services:
     ports: ["8085:80"]
     depends_on:
       mysql: {condition: service_healthy}
-      python_service: {condition: service_started}
+      python_service: {condition: service_healthy}
     restart: unless-stopped
 
 volumes:

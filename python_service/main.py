@@ -31,6 +31,12 @@ else:
 DEVANAGARI_DIGITS = str.maketrans("०१२३४५६७८९", "0123456789")
 PAN_PATTERN = re.compile(r"[A-Z]{5}[0-9]{4}[A-Z]")
 
+FINANCIAL_KEYWORDS = (
+    "बँक", "पतसंस्था", "खाते", "खातेदार", "वेतन", "उत्पन्न", "रुपये", "पॅन",
+    "bank", "society", "patsanstha", "account", "acct", "salary", "income",
+    "rs", "inr", "pan", "passbook", "loan"
+)
+
 SYSTEM_PROMPT = """You extract loan/passbook data for Maharashtra cooperative banks and Patsansthas.
 Return ONLY a valid JSON object matching these exact keys:
 {
@@ -48,6 +54,19 @@ Normalize Devanagari numerals (०-९) to Arabic digits (0-9). Transliterate Ma
 class ExtractionRequest(BaseModel):
     model_config = ConfigDict(str_strip_whitespace=True)
     raw_text: str = Field(min_length=8, max_length=20000)
+
+    @field_validator("raw_text")
+    @classmethod
+    def validate_financial_content(cls, value: str) -> str:
+        text_lower = value.lower()
+        has_keyword = any(kw in text_lower for kw in FINANCIAL_KEYWORDS)
+        has_numeric_sequence = bool(re.search(r"[0-9०-९]{4,}", value))
+
+        if not (has_keyword or has_numeric_sequence):
+            raise ValueError(
+                "Document appears non-financial or unreadable: missing banking terminology or account/amount figures."
+            )
+        return value
 
 
 class ExtractedLoanData(BaseModel):
@@ -118,12 +137,11 @@ def parse_dynamically(raw_text: str) -> dict:
         ),
     )
 
-    # Generic fallback excludes common 10-digit phone numbers and YYYYMMDD dates.
     if not account:
         candidates = re.findall(r"(?<!\d)\d{3,20}(?!\d)", normalized)
         candidates = [n for n in candidates if len(n) != 10 and not re.fullmatch(r"20\d{6}", n)]
-        account = next((n for n in candidates if len(n) >= 9), candidates[0] if candidates else "000000")
-    account = re.sub(r"\D", "", account) or "000000"
+        account = next((n for n in candidates if len(n) >= 9), candidates[0] if candidates else "")
+    account = re.sub(r"\D", "", account)
 
     income = 0.0
     if income_text:
@@ -133,7 +151,6 @@ def parse_dynamically(raw_text: str) -> dict:
     else:
         for number in re.findall(r"(?<!\d)\d[\d, ]*(?!\d)", normalized):
             digits = re.sub(r"\D", "", number)
-            # Ignore date-shaped values and phone/account length values.
             if digits and len(digits) <= 7 and 5000 < int(digits) <= 100000000:
                 income = float(digits)
                 break
@@ -148,9 +165,9 @@ def parse_dynamically(raw_text: str) -> dict:
         "bank_or_society_name": first_line or "सहकारी संस्था",
         "applicant_name_marathi": name_mr,
         "applicant_name_english": name_mr,
-        "account_number": account,
+        "account_number": account or "000000",
         "pan_number": pan_match.group(0) if pan_match else None,
-        "monthly_income": income or 15000.0,
+        "monthly_income": income,
         "district": district_match.group(1).strip() if district_match else "Maharashtra",
     }
 
@@ -160,18 +177,30 @@ def assess(data: dict) -> dict:
     score = 50
     flags: list[str] = []
 
+    account_digits = re.sub(r"\D", "", normalize_digits(str(data.get("account_number") or "")))
+    has_pan = bool(data.get("pan_number"))
+
+    # Fail-safe check: document has no account, no PAN, and no salary recorded
+    if (not account_digits or account_digits == "000000") and not has_pan and income == 0.0:
+        flags.extend(["UNREADABLE_DOCUMENT", "INCOMPLETE_ACCOUNT_NO", "MISSING_PAN", "LOW_INCOME_RISK"])
+        data.update(
+            eligibility_score=0,
+            status="REJECTED",
+            risk_flags=flags,
+        )
+        return data
+
     if income > 25000:
         score += 25
     elif income < 15000:
         score -= 15
         flags.append("LOW_INCOME_RISK")
 
-    if data.get("pan_number"):
+    if has_pan:
         score += 15
     else:
         flags.append("MISSING_PAN")
 
-    account_digits = re.sub(r"\D", "", normalize_digits(str(data.get("account_number") or "")))
     if len(account_digits) < 9:
         score -= 30
         flags.append("INCOMPLETE_ACCOUNT_NO")
@@ -217,9 +246,12 @@ def extract(request: ExtractionRequest) -> LoanAssessment:
     if not isinstance(parsed, dict):
         parsed = fallback
     else:
-        # Fill absent or unusable fields from the conservative local extraction.
         for key, value in fallback.items():
-            if key not in parsed or parsed[key] is None or parsed[key] == "":
+            # Never overwrite an explicit None PAN from the LLM
+            if key == "pan_number":
+                if key not in parsed:
+                    parsed[key] = value
+            elif key not in parsed or parsed[key] is None or parsed[key] == "":
                 parsed[key] = value
 
     assessed = assess(parsed)
